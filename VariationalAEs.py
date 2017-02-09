@@ -36,15 +36,15 @@ logging_level = logging.DEBUG
 logging_format = '[%(funcName)s] %(message)s'
 
 in_dim = 784
-z_dim = 128
+z_dim = 20
 
-batch_size = 20
-learning_rate = 0.005
+batch_size = 128
+learning_rate = 0.01
 
-total_epochs = 80
+total_epochs = 50
 
 Q_layers = ['fulcon_1','fulcon_2','fulcon_3','fulcon_4','fulcon_out_mu','fulcon_out_sigma'] # encoder
-P_layers = ['fulcon_1','fulcon_2','fulcon_3','fulcon_out'] # decoder
+P_layers = ['fulcon_1','fulcon_2','fulcon_3','fulcon_4','fulcon_out'] # decoder
 
 Q_fc1_hyp = {'in':in_dim,'out':1024}
 Q_fc2_hyp = {'in':Q_fc1_hyp['out'],'out':768}
@@ -61,12 +61,14 @@ Q_hyperparameters = {
 
 P_fc1_hyp = {'in':z_dim,'out':256}
 P_fc2_hyp = {'in':P_fc1_hyp['out'],'out':512}
-P_fc3_hyp = {'in':P_fc2_hyp['out'],'out':1024}
-P_fc_out_hyp = {'in':P_fc3_hyp['out'],'out':in_dim}
+P_fc3_hyp = {'in':P_fc2_hyp['out'],'out':768}
+P_fc4_hyp = {'in':P_fc3_hyp['out'],'out':1024}
+P_fc_out_hyp = {'in':P_fc4_hyp['out'],'out':in_dim}
 
 P_hyperparameters =  {
-    'fulcon_1':P_fc1_hyp,'fulcon_2':P_fc2_hyp,
-    'fulcon_3':P_fc3_hyp,'fulcon_out':P_fc_out_hyp
+    'fulcon_1':P_fc1_hyp, 'fulcon_2':P_fc2_hyp,
+    'fulcon_3':P_fc3_hyp, 'fulcon_4':P_fc4_hyp,
+    'fulcon_out':P_fc_out_hyp
 }
 
 P_Weights, P_Biases = {},{}
@@ -81,7 +83,7 @@ def initialize_encoder_and_decoder():
     for pl in P_layers:
         P_Weights[pl] = tf.Variable(tf.truncated_normal(
             [P_hyperparameters[pl]['in'], P_hyperparameters[pl]['out']],
-            stddev=2. / (P_hyperparameters[pl]['in'] + P_hyperparameters[pl]['out']))
+            stddev=6. / (P_hyperparameters[pl]['in'] + P_hyperparameters[pl]['out']))
         ,name = 'w_'+pl)
         P_Biases[pl] = tf.Variable(tf.constant(
             0.0, shape=[P_hyperparameters[pl]['out']]
@@ -91,7 +93,7 @@ def initialize_encoder_and_decoder():
     for ql in Q_layers:
         Q_Weights[ql] = tf.Variable(tf.truncated_normal(
             [Q_hyperparameters[ql]['in'], Q_hyperparameters[ql]['out']],
-            stddev=2. / (Q_hyperparameters[ql]['in'] + Q_hyperparameters[ql]['out']))
+            stddev=6. / (Q_hyperparameters[ql]['in'] + Q_hyperparameters[ql]['out']))
             , name='w_' + ql)
         Q_Biases[ql] = tf.Variable(tf.constant(
             0.0, shape=[Q_hyperparameters[ql]['out']]
@@ -107,12 +109,13 @@ def Q(x):
         logger.debug('Calculating Encoder output for %s',ql)
         outputs.append(tf.nn.relu(tf.matmul(outputs[-1],Q_Weights[ql])+Q_Biases[ql]))
         logger.debug('\tOutput size: %s\n',outputs[-1].get_shape().as_list())
+
     # calculate mu and sigma
     logger.debug('Calculating Encoder mu')
     outputs_mu = tf.matmul(outputs[-1],Q_Weights['fulcon_out_mu'])+Q_Biases['fulcon_out_mu']
     logger.debug('\tOutput size: %s\n', outputs_mu.get_shape().as_list())
     logger.debug('Calculating Encoder sigma')
-    outputs_sigma=tf.matmul(outputs[-1], Q_Weights['fulcon_out_sigma']) + Q_Biases['fulcon_out_sigma']
+    outputs_sigma= tf.matmul(outputs[-1], Q_Weights['fulcon_out_sigma']) + Q_Biases['fulcon_out_sigma']
     logger.debug('\tOutput size: %s\n', outputs_sigma.get_shape().as_list())
 
     outputs.append(outputs_mu)
@@ -134,10 +137,10 @@ def P(z):
     return outputs
 
 
-def loss(x,x_tilde,mu,sigma):
+def loss(x,x_tilde,mu,logsig):
 
-    log_pX_given_z_loss = tf.reduce_sum((x-x_tilde)**2,1)
-    kl_div_loss = -tf.reduce_sum(0.5*(1+ tf.log(1e-10+sigma**2) - mu**2 - sigma**2),1)
+    log_pX_given_z_loss = tf.reduce_sum(tf.square(x-x_tilde),1)
+    kl_div_loss = - 0.5 * tf.reduce_sum(1 + 2*logsig - tf.square(mu) - tf.exp(2*logsig),1)
 
     l = tf.reduce_mean(log_pX_given_z_loss + kl_div_loss,name='cost')
 
@@ -145,8 +148,8 @@ def loss(x,x_tilde,mu,sigma):
 
 
 def optimize(loss):
-
-    optimizer = tf.train.MomentumOptimizer(learning_rate=learning_rate, momentum=0.9).minimize(loss)
+    optimizer = tf.train.MomentumOptimizer(learning_rate=learning_rate,momentum=0.9).minimize(loss)
+    #optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(loss)
     return optimizer
 
 
@@ -189,39 +192,42 @@ if __name__ == '__main__':
         initialize_encoder_and_decoder()
 
         tf_Q_out = Q(tf_x)
-        tf_Q_mu,tf_Q_sig = tf_Q_out[-1],tf_Q_out[-2]
-        tf_z = tf_Q_mu + tf_Q_sig * tf_epsilon
+        tf_Q_mu,tf_Q_logsig = tf_Q_out[-2],tf_Q_out[-1]
+        tf_z = tf_Q_mu + tf.exp(tf_Q_logsig) * tf_epsilon
 
         tf_P_out = P(tf_z)
         tf_x_tilde = tf_P_out[-1]
 
-        tf_loss = loss(tf_x,tf_x_tilde,tf_Q_mu,tf_Q_sig)
+        tf_loss = loss(tf_x,tf_x_tilde,tf_Q_mu,tf_Q_logsig)
         tf_optimize = optimize(tf_loss)
 
         session.run(tf.global_variables_initializer())
 
         for epoch in range(total_epochs):
 
+            mean_loss = []
             for batch_id in range((dataset_size//batch_size) -1):
                 batch_data = dataset[batch_id*batch_size:(batch_id+1)*batch_size,:]
                 epsilon = np.random.normal(size=(batch_size,z_dim))
 
                 q,p,loss,_,_ = session.run([tf_Q_out,tf_P_out,tf_loss,tf_optimize,tf_x_tilde],feed_dict = {tf_x:batch_data,tf_epsilon:epsilon})
-
+                mean_loss.append(loss)
                 if np.isnan(loss):
                     break
 
-            logger.info('='*60)
-            logger.info('Epoch: %d',epoch)
-            logger.info('Loss: %.5f',loss)
-            logger.info('Mean mu: %.5f',np.mean(q[-2]))
-            logger.info('Mean sig: %.5f', np.mean(q[-1]))
+            if (epoch+1)%5==0:
+                logger.info('='*60)
+                logger.info('Epoch: %d',epoch)
+                logger.info('Loss: %.5f',np.mean(loss))
+                logger.info('Mean mu: %.8f',np.mean(q[-2]))
+                logger.info('Mean sig: %.8f', np.mean(q[-1]))
 
             # test
-            if (epoch+1)%5==0:
+            if (epoch+1)%10==0:
                 test_epsilon = np.random.normal(size=(batch_size,z_dim))
                 generated_x = session.run(tf_x_tilde,feed_dict = {tf_z:test_epsilon})
 
                 for save_id in range(6):
                     img_id = np.random.randint(0,generated_x.shape[0])
-                    imsave('test_img_'+str(epoch)+'_'+str(save_id)+'.png',generated_x[img_id,:].reshape(28,28))
+                    #imsave('original_img_'+str(epoch+1)+'_'+str(save_id)+'.png',dataset[img_id,:].reshape(28,28))
+                    imsave('test_img_'+str(epoch+1)+'_'+str(save_id)+'.png',generated_x[img_id,:].reshape(28,28))
