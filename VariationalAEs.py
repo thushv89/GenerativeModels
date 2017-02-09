@@ -1,5 +1,9 @@
 import tensorflow as tf
-
+import logging
+import numpy as np
+import os
+import sys
+import struct
 
 __author__ = 'Thushan Ganegedara'
 
@@ -27,13 +31,16 @@ and KL[Q(z|X)||P(z)] = -(1/2)*(1+log(sigma^2) - mu^2 - sigma^2) used in practice
 Maximize RHS
 ================================================================'''
 
+logging_level = logging.DEBUG
+logging_format = '[%(funcName)s] %(message)s'
+
 in_dim = 784
 z_dim = 128
 
 batch_size = 128
-learning_rate = 0.01
+learning_rate = 0.001
 
-total_epochs = 20
+total_epochs = 5
 
 Q_layers = ['fulcon_1','fulcon_2','fulcon_3','fulcon_4','fulcon_out_mu','fulcon_out_sigma'] # encoder
 P_layers = ['fulcon_1','fulcon_2','fulcon_3','fulcon_out'] # decoder
@@ -68,7 +75,7 @@ logger = None
 
 def initialize_encoder_and_decoder():
 
-    logger.info('Initializing the Encoder(Q) and Decoder(P)')
+    logger.info('Initializing the Encoder(Q) and Decoder(P)\n')
     # initializing the decoder
     for pl in P_layers:
         P_Weights[pl] = tf.Variable(tf.truncated_normal(
@@ -81,11 +88,11 @@ def initialize_encoder_and_decoder():
 
     # initializing the encoder
     for ql in Q_layers:
-        Q_Weights[pl] = tf.Variable(tf.truncated_normal(
+        Q_Weights[ql] = tf.Variable(tf.truncated_normal(
             [Q_hyperparameters[ql]['in'], Q_hyperparameters[ql]['out']],
             stddev=2. / (Q_hyperparameters[ql]['in'] + Q_hyperparameters[ql]['out']))
             , name='w_' + ql)
-        Q_Biases[pl] = tf.Variable(tf.constant(
+        Q_Biases[ql] = tf.Variable(tf.constant(
             0.0, shape=[Q_hyperparameters[ql]['out']]
         ), name='b_' + ql)
 
@@ -96,11 +103,20 @@ def Q(x):
 
     # we calculate the output up to the last hidden layer
     for ql in Q_layers[:-2]:
+        logger.debug('Calculating Encoder output for %s',ql)
         outputs.append(tf.nn.relu(tf.matmul(outputs[-1],Q_Weights[ql])+Q_Biases[ql]))
-
+        logger.debug('\tOutput size: %s\n',outputs[-1].get_shape().as_list())
     # calculate mu and sigma
-    outputs.append(tf.nn.relu(tf.matmul(outputs[-1],Q_Weights['fulcon_out_mu'])+Q_Biases['fulcon_out_mu']))
-    outputs.append(tf.nn.relu(tf.matmul(outputs[-1], Q_Weights['fulcon_out_sigma']) + Q_Biases['fulcon_out_sigma']))
+    logger.debug('Calculating Encoder mu')
+    outputs_mu = tf.nn.relu(tf.matmul(outputs[-1],Q_Weights['fulcon_out_mu'])+Q_Biases['fulcon_out_mu'])
+    logger.debug('\tOutput size: %s\n', outputs_mu.get_shape().as_list())
+    logger.debug('Calculating Encoder sigma')
+    outputs_sigma=tf.nn.relu(tf.matmul(outputs[-1], Q_Weights['fulcon_out_sigma']) + Q_Biases['fulcon_out_sigma'])
+    logger.debug('\tOutput size: %s\n', outputs_sigma.get_shape().as_list())
+
+    outputs.append(outputs_mu)
+    outputs.append(outputs_sigma)
+
     return outputs
 
 
@@ -108,18 +124,21 @@ def Q(x):
 def P(z):
     outputs = [z]
 
-    for pl in P_layers:
+    for pl in P_layers[:-1]:
+        logger.debug('Calculating Decoder output for %s', pl)
         outputs.append(tf.nn.relu(tf.matmul(outputs[-1], P_Weights[pl]) + P_Biases[pl]))
+        logger.debug('\tOutput size: %s\n', outputs[-1].get_shape().as_list())
 
+    outputs.append(tf.nn.sigmoid(tf.matmul(outputs[-1], P_Weights['fulcon_out']) + P_Biases['fulcon_out']))
     return outputs
 
 
 def loss(x,x_tilde,mu,sigma):
 
-    log_pX_given_z_loss = tf.nn.l2_loss(x-x_tilde,name='log_pX_loss')
-    kl_div_loss = -tf.reduce_sum(0.5*(1+ tf.log(sigma**2) - mu**2 - sigma**2))
+    log_pX_given_z_loss = tf.reduce_sum((x-x_tilde)**2,1)
+    kl_div_loss = -tf.reduce_sum(0.5*(1+ tf.log(1e-10+sigma**2) - mu**2 - sigma**2),1)
 
-    l = log_pX_given_z_loss + kl_div_loss
+    l = tf.reduce_mean(log_pX_given_z_loss + kl_div_loss,name='cost')
 
     return l
 
@@ -129,9 +148,28 @@ def optimize(loss):
     optimizer = tf.train.MomentumOptimizer(learning_rate=learning_rate, momentum=0.9).minimize(loss)
     return optimizer
 
+def load_mnist(fname_img):
+    with open(fname_img, 'rb') as fimg:
+        magic, num, rows, cols = struct.unpack(">IIII", fimg.read(16))
+        img = np.fromfile(fimg, dtype=np.uint8).reshape(num, rows*cols)
+
+    return img
+
 if __name__ == '__main__':
 
+    logger = logging.getLogger('main_logger')
+    logger.setLevel(logging_level)
+    console = logging.StreamHandler(sys.stdout)
+    console.setFormatter(logging.Formatter(logging_format))
+    console.setLevel(logging_level)
+    logger.addHandler(console)
+
     graph = tf.Graph()
+
+    dataset = load_mnist('data'+os.sep + 'train-images.idx3-ubyte')
+    dataset_size = dataset.shape[0]
+
+    logger.info('Data loaded of size: %s',str(dataset.shape))
 
     with tf.Session(graph=graph, config=tf.ConfigProto(allow_soft_placement=True)) as session:
 
@@ -142,11 +180,26 @@ if __name__ == '__main__':
 
         tf_Q_out = Q(tf_x)
         tf_Q_mu,tf_Q_sig = tf_Q_out[-1],tf_Q_out[-2]
-
         tf_z = tf_Q_mu + tf_Q_sig * tf_epsilon
+
+        tf_P_out = P(tf_z)
+        tf_x_tilde = tf_P_out[-1]
+
+        tf_loss = loss(tf_x,tf_x_tilde,tf_Q_mu,tf_Q_sig)
+        tf_optimize = optimize(tf_loss)
+
+        session.run(tf.global_variables_initializer())
 
         for epoch in range(total_epochs):
 
-            for batch_id in range(dataset_size//batch_size):
-                epsilon = tf.random_normal([batch_size, z_dim], name='epsilon')
+            for batch_id in range((dataset_size//batch_size) -1):
+                batch_data = dataset[batch_id*batch_size:(batch_id+1)*batch_size,:]
+                epsilon = np.random.normal(size=(batch_size,z_dim))
 
+                q,p,loss,_,generated_x = session.run([tf_Q_out,tf_P_out,tf_loss,tf_optimize,tf_x_tilde],feed_dict = {tf_x:batch_data,tf_epsilon:epsilon})
+
+                logger.info('='*60)
+                logger.info('Epoch: %d',epoch)
+                logger.info('Loss: %.5f',loss)
+                logger.info('Mean mu: %.2f',np.mean(q[-2]))
+                logger.info('Mean sig: %.2f', np.mean(q[-1]))
