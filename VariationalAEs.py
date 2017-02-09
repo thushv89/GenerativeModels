@@ -4,6 +4,7 @@ import numpy as np
 import os
 import sys
 import struct
+from scipy.misc import imsave
 
 __author__ = 'Thushan Ganegedara'
 
@@ -37,10 +38,10 @@ logging_format = '[%(funcName)s] %(message)s'
 in_dim = 784
 z_dim = 128
 
-batch_size = 128
-learning_rate = 0.001
+batch_size = 20
+learning_rate = 0.005
 
-total_epochs = 5
+total_epochs = 80
 
 Q_layers = ['fulcon_1','fulcon_2','fulcon_3','fulcon_4','fulcon_out_mu','fulcon_out_sigma'] # encoder
 P_layers = ['fulcon_1','fulcon_2','fulcon_3','fulcon_out'] # decoder
@@ -108,10 +109,10 @@ def Q(x):
         logger.debug('\tOutput size: %s\n',outputs[-1].get_shape().as_list())
     # calculate mu and sigma
     logger.debug('Calculating Encoder mu')
-    outputs_mu = tf.nn.relu(tf.matmul(outputs[-1],Q_Weights['fulcon_out_mu'])+Q_Biases['fulcon_out_mu'])
+    outputs_mu = tf.matmul(outputs[-1],Q_Weights['fulcon_out_mu'])+Q_Biases['fulcon_out_mu']
     logger.debug('\tOutput size: %s\n', outputs_mu.get_shape().as_list())
     logger.debug('Calculating Encoder sigma')
-    outputs_sigma=tf.nn.relu(tf.matmul(outputs[-1], Q_Weights['fulcon_out_sigma']) + Q_Biases['fulcon_out_sigma'])
+    outputs_sigma=tf.matmul(outputs[-1], Q_Weights['fulcon_out_sigma']) + Q_Biases['fulcon_out_sigma']
     logger.debug('\tOutput size: %s\n', outputs_sigma.get_shape().as_list())
 
     outputs.append(outputs_mu)
@@ -148,12 +149,17 @@ def optimize(loss):
     optimizer = tf.train.MomentumOptimizer(learning_rate=learning_rate, momentum=0.9).minimize(loss)
     return optimizer
 
+
 def load_mnist(fname_img):
     with open(fname_img, 'rb') as fimg:
         magic, num, rows, cols = struct.unpack(">IIII", fimg.read(16))
         img = np.fromfile(fimg, dtype=np.uint8).reshape(num, rows*cols)
-
+        img = img.astype('float32')
+        logger.info('Before normalize: min max: %.2f %.2f',np.min(img),np.max(img))
+        img = (img - np.mean(img,1).reshape(-1,1))/255.0
+        logger.info('After normalize: min max: %.2f %.2f',np.min(img),np.max(img))
     return img
+
 
 if __name__ == '__main__':
 
@@ -169,7 +175,11 @@ if __name__ == '__main__':
     dataset = load_mnist('data'+os.sep + 'train-images.idx3-ubyte')
     dataset_size = dataset.shape[0]
 
+    logger.info('='*60)
     logger.info('Data loaded of size: %s',str(dataset.shape))
+    logger.info('Data min max: %.2f,%.2f',np.min(dataset),np.max(dataset))
+    logger.info('='*60)
+    assert np.max(dataset)<1.2 and np.min(dataset)>-1.2
 
     with tf.Session(graph=graph, config=tf.ConfigProto(allow_soft_placement=True)) as session:
 
@@ -196,10 +206,22 @@ if __name__ == '__main__':
                 batch_data = dataset[batch_id*batch_size:(batch_id+1)*batch_size,:]
                 epsilon = np.random.normal(size=(batch_size,z_dim))
 
-                q,p,loss,_,generated_x = session.run([tf_Q_out,tf_P_out,tf_loss,tf_optimize,tf_x_tilde],feed_dict = {tf_x:batch_data,tf_epsilon:epsilon})
+                q,p,loss,_,_ = session.run([tf_Q_out,tf_P_out,tf_loss,tf_optimize,tf_x_tilde],feed_dict = {tf_x:batch_data,tf_epsilon:epsilon})
 
-                logger.info('='*60)
-                logger.info('Epoch: %d',epoch)
-                logger.info('Loss: %.5f',loss)
-                logger.info('Mean mu: %.2f',np.mean(q[-2]))
-                logger.info('Mean sig: %.2f', np.mean(q[-1]))
+                if np.isnan(loss):
+                    break
+
+            logger.info('='*60)
+            logger.info('Epoch: %d',epoch)
+            logger.info('Loss: %.5f',loss)
+            logger.info('Mean mu: %.5f',np.mean(q[-2]))
+            logger.info('Mean sig: %.5f', np.mean(q[-1]))
+
+            # test
+            if (epoch+1)%5==0:
+                test_epsilon = np.random.normal(size=(batch_size,z_dim))
+                generated_x = session.run(tf_x_tilde,feed_dict = {tf_z:test_epsilon})
+
+                for save_id in range(6):
+                    img_id = np.random.randint(0,generated_x.shape[0])
+                    imsave('test_img_'+str(epoch)+'_'+str(save_id)+'.png',generated_x[img_id,:].reshape(28,28))
