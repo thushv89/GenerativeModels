@@ -49,6 +49,7 @@ beta = 0
 Q_layers = ['fulcon_1','fulcon_2','fulcon_3','fulcon_out_mu','fulcon_out_sigma'] # encoder
 P_layers = ['fulcon_1','fulcon_2','fulcon_3','fulcon_out'] # decoder
 
+# Hyperparameters of the decoder
 Q_fc1_hyp = {'in':in_dim,'out':1024}
 Q_fc2_hyp = {'in':Q_fc1_hyp['out'],'out':768}
 Q_fc3_hyp = {'in':Q_fc2_hyp['out'],'out':512}
@@ -61,6 +62,7 @@ Q_hyperparameters = {
     'fulcon_out_mu':Q_fc_out_mu_hyp,'fulcon_out_sigma':Q_fc_out_sig_hyp
 }
 
+# Hyperparameters of the encoder
 P_fc1_hyp = {'in':z_dim,'out':512}
 P_fc2_hyp = {'in':P_fc1_hyp['out'],'out':768}
 P_fc3_hyp = {'in':P_fc2_hyp['out'],'out':1024}
@@ -72,8 +74,8 @@ P_hyperparameters =  {
     'fulcon_out':P_fc_out_hyp
 }
 
-P_Weights, P_Biases = {},{}
-Q_Weights, Q_Biases = {},{}
+P_Weights, P_Biases = {},{} # weights and biases of the encoder
+Q_Weights, Q_Biases = {},{} # weights and biases of the decoder
 
 logger = None
 
@@ -142,8 +144,11 @@ def P(z):
 
 def loss(x,x_tilde,mu,logsig):
 
+    # reconstruction loss (Uncomment the one you need and comment the one you don't)
     log_pX_given_z_loss = tf.reduce_sum(tf.square(x-x_tilde),1)
+    # binary cross-entropy loss (Uncomment the one you need and comment the one you don't)
     #log_pX_given_z_loss = -tf.reduce_sum(x*tf.log(1e-10 + x_tilde) + (1.0-x)*tf.log(1e-10 + 1.0 - x_tilde), 1)
+
     kl_div_loss = - 0.5 * tf.reduce_sum(1 + 2*logsig - tf.square(mu) - tf.exp(2*logsig),1)
 
     P_l2_loss = beta * tf.reduce_sum([tf.nn.l2_loss(w) for w in list(P_Weights.values())])
@@ -154,14 +159,13 @@ def loss(x,x_tilde,mu,logsig):
 
 
 def optimize(loss):
-    #optimizer = tf.train.MomentumOptimizer(learning_rate=learning_rate,momentum=0.9)\
-    #    .minimize(loss,var_list=tf.trainable_variables())
     optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(loss)
     return optimizer
 
-def sample_gaussian(args):
-    mu,log_sigma = args
+
+def sample_gaussian(mu,log_sigma):
     return mu + tf.exp(log_sigma) * tf.random_normal([batch_size,z_dim])
+
 
 def load_mnist(fname_img):
     with open(fname_img, 'rb') as fimg:
@@ -191,24 +195,20 @@ if __name__ == '__main__':
     logger.info('Data loaded of size: %s',str(dataset.shape))
     logger.info('Data min max: %.2f,%.2f',np.min(dataset),np.max(dataset))
     logger.info('='*60)
-    assert np.max(dataset)<=1.0 and np.min(dataset)>= -1.0
+    assert np.max(dataset)<=1.0 and np.min(dataset)>= 0.0 # make sure data is normalized to 0 - 1
 
     gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.7)
     with tf.Session(graph=graph, config=tf.ConfigProto(allow_soft_placement=True,gpu_options=gpu_options)) as session:
 
         tf_x = tf.placeholder(tf.float32,shape=(None,in_dim),name='X')
-        #tf_epsilon = tf.placeholder(tf.float32,shape=(None,z_dim),name='z')
 
         initialize_encoder_and_decoder()
 
-        tf_Q_out = Q(tf_x)
-        tf_Q_mu,tf_Q_logsig = tf_Q_out[-2],tf_Q_out[-1]
-        #tf_z = sample_gaussian(tf_Q_mu,tf_Q_logsig)
+        tf_Q_mu, tf_Q_logsig = Q(tf_x) # output mu(X) and log(sigma(X))
 
-        #tf_z = tf.Variable(tf.zeros([batch_size,z_dim]),trainable=False)
-        #tf_z = tf.placeholder(tf.float32, shape=(None, z_dim), name='z')
-        #tf_P_out = P(tf_z)
-        tf_x_tilde = P(sample_gaussian(Q(tf_x)))
+        tf_z = sample_gaussian(tf_Q_mu,tf_Q_logsig) # sample z with reparameterization trick
+
+        tf_x_tilde = P(tf_z) # generated image
 
         tf_loss = loss(tf_x, tf_x_tilde, tf_Q_mu, tf_Q_logsig)
         tf_optimize = optimize(tf_loss)
@@ -225,17 +225,14 @@ if __name__ == '__main__':
             mean_loss = []
             for batch_id in range((dataset_size//batch_size) -1):
                 batch_data = dataset[batch_id*batch_size:(batch_id+1)*batch_size,:]
-                #tf_z = sample_gaussian(tf_Q_mu, tf_Q_logsig)
-                #with tf.control_dependencies([tf.assign(tf_z,tf_Q_mu + tf.exp(tf_Q_logsig) * tf.random_normal([batch_size,z_dim]))]):
                 z_mu, z_logsig, batch_l, _ = session.run([tf_Q_mu,tf_Q_logsig,tf_loss,tf_optimize],
                                                                     feed_dict = {tf_x:batch_data})
-
-                #tf_z = tf_Q_mu + tf.exp(tf_Q_logsig) * tf.random_normal([batch_size, z_dim])
 
                 mean_loss.append(batch_l)
                 if np.isnan(batch_l):
                     break
 
+            # print out the epoch summary
             if epoch > 0 and epoch%1==0:
                 logger.info('='*60)
                 logger.info('Epoch: %d (%d batches)',epoch,batch_id)
@@ -246,10 +243,8 @@ if __name__ == '__main__':
             # test
             if epoch>0 and (epoch+1)%5==0:
                 tf.set_random_seed(np.random.randint(0,13254643))
-                tf_test_gen = P(tf.random_normal([batch_size,z_dim]))
-                generated_x = session.run(tf_test_gen)
+                generated_x = session.run(tf_x_tilde, feed_dict = {tf_z:tf.random_normal([batch_size,z_dim])})
 
                 for save_id in range(persist_count):
                     img_id = np.random.randint(0,generated_x.shape[0])
-                    #imsave(local_dir + os.sep + 'original_img_'+str(epoch+1)+'_'+str(save_id)+'.png',dataset[img_id,:].reshape(28,28))
                     imsave(local_dir+os.sep+'test_img_'+str(epoch+1)+'_'+str(save_id)+'.png',generated_x[img_id,:].reshape(28,28))
